@@ -69,6 +69,39 @@ BASE_ENV=(
     "RATIO_STEP=0.001"
 )
 
+plainmsg_shared_env() {
+    local max_inflight=${1:-}
+    local -a env_values=(
+        "NUM_SERVERS=5"
+        "NUM_CLIENTS=2"
+        "THRESHOLD=2"
+        "OPS=0"
+        "EVAL_TYPE=0"
+        "BATCHSIZE=1"
+        "MSG_SIZE=512"
+        "MODE=1"
+        "HOT_RATIO=0"
+        "INDEP_RATIO=90"
+        "COMMON_RATIO=10"
+        "BATCH_MODE=single"
+        "BATCH_COMPOSITION=object-specific"
+        "LOG_LEVEL=debug"
+        "ENABLE_PRIORITY=false"
+        "RATIO_STEP=0.001"
+        "ENABLE_TIMESERIES=true"
+    )
+
+    if [ -n "$max_inflight" ]; then
+        env_values+=("MAX_INFLIGHT=${max_inflight}")
+    fi
+
+    printf '%s\n' "${env_values[@]}"
+}
+
+set_base_env() {
+    mapfile -t BASE_ENV < <(plainmsg_shared_env "$1")
+}
+
 mkdir -p "$RUN_DIR"
 
 # ================================================================
@@ -681,21 +714,27 @@ fi
 # ================================================================
 # EVAL crash: fault injection
 # ================================================================
+COMPARABLE_RUNTIME_SECONDS=60
+COMPARABLE_CRASH_TRIGGER_SECONDS=15
+COMPARABLE_MAX_INFLIGHT=5
+
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
     echo "── EVAL crash: fault injection ─────────────────────────────────"
-    BASE_ENV=(
-        "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
-        "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-        "HOT_RATIO=0" "INDEP_RATIO=90" "COMMON_RATIO=10"
-        "BATCH_MODE=single" "BATCH_COMPOSITION=object-specific"
-        "LOG_LEVEL=debug" "ENABLE_PRIORITY=false" "RATIO_STEP=0.001"
-        "ENABLE_TIMESERIES=true"
-    )
+
+    _SAVED_RUNTIME=$RUNTIME_SECONDS
+    _SAVED_CRASH_TRIGGER=$CRASH_TRIGGER_SECONDS
+    RUNTIME_SECONDS=$COMPARABLE_RUNTIME_SECONDS
+    CRASH_TRIGGER_SECONDS=$COMPARABLE_CRASH_TRIGGER_SECONDS
+
+    set_base_env "$COMPARABLE_MAX_INFLIGHT"
     run_crash_case_sampled "eval_crash_no_failure"  "no_failure"
     run_crash_case_sampled "eval_crash_leader"      "leader"
     run_crash_case_sampled "eval_crash_follower1"   "follower:1"
     run_crash_case_sampled "eval_crash_follower4"   "follower:4"
     run_crash_case_sampled "eval_crash_f_of_n1"     "f_of_n:1"
+
+    RUNTIME_SECONDS=${_SAVED_RUNTIME}
+    CRASH_TRIGGER_SECONDS=${_SAVED_CRASH_TRIGGER}
 fi
 
 # ================================================================
@@ -704,34 +743,27 @@ fi
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" ]]; then
     echo "── EVAL 4: Network delay ────────────────────────────────────────"
 
+    _SAVED_RUNTIME=$RUNTIME_SECONDS
+    _SAVED_CRASH_TRIGGER=$CRASH_TRIGGER_SECONDS
+    RUNTIME_SECONDS=$COMPARABLE_RUNTIME_SECONDS
+    CRASH_TRIGGER_SECONDS=$COMPARABLE_CRASH_TRIGGER_SECONDS
+
     # D1: uniform delay sweep
     echo "  D1: uniform delay sweep"
     for delay_ms in 0 5 10 20 50 100 200; do
         jitter_ms=0
         [ "$delay_ms" -gt 0 ] && jitter_ms=$(( delay_ms / 5 ))
-        BASE_ENV=(
-            "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
-            "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-            "HOT_RATIO=0" "INDEP_RATIO=90" "COMMON_RATIO=10"
-            "BATCH_MODE=single" "BATCH_COMPOSITION=object-specific"
-            "LOG_LEVEL=debug" "ENABLE_PRIORITY=false" "RATIO_STEP=0.001"
-            "ENABLE_TIMESERIES=true"
-        )
+        set_base_env "$COMPARABLE_MAX_INFLIGHT"
         run_d1_case_sampled "eval4_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
     done
 
     # D4: burst stress
     echo "  D4: burst stress (10s calm / 5s spike)"
-    BASE_ENV=(
-        "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
-        "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-        "HOT_RATIO=0" "INDEP_RATIO=90" "COMMON_RATIO=10"
-        "BATCH_MODE=single" "BATCH_COMPOSITION=object-specific"
-        "LOG_LEVEL=debug" "ENABLE_PRIORITY=false" "RATIO_STEP=0.001"
-        "ENABLE_TIMESERIES=true"
-    )
-    D4_RUNTIME=$(( RUNTIME_SECONDS < 45 ? 45 : RUNTIME_SECONDS ))
-    run_d4_case_sampled "eval4_D4_burst" 10 5 "$D4_RUNTIME"
+    set_base_env "$COMPARABLE_MAX_INFLIGHT"
+    run_d4_case_sampled "eval4_D4_burst" 10 5 "$RUNTIME_SECONDS"
+
+    RUNTIME_SECONDS=${_SAVED_RUNTIME}
+    CRASH_TRIGGER_SECONDS=${_SAVED_CRASH_TRIGGER}
 fi
 
 # ================================================================
@@ -740,14 +772,16 @@ fi
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4s" ]]; then
     echo ""
     echo "╔════════════════════════════════════════════════════════════════╗"
-    echo "║  EVAL 4s: Network Delay (fixed MAX_INFLIGHT=1)                ║"
+    echo "║  EVAL 4s: Network Delay (fixed MAX_INFLIGHT=5)                ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
 
     _SAVED_RUNTIME=$RUNTIME_SECONDS
-    RUNTIME_SECONDS=45
+    _SAVED_CRASH_TRIGGER=$CRASH_TRIGGER_SECONDS
+    RUNTIME_SECONDS=$COMPARABLE_RUNTIME_SECONDS
+    CRASH_TRIGGER_SECONDS=$COMPARABLE_CRASH_TRIGGER_SECONDS
 
     echo ""
-    echo "── D1: Uniform delays (MAX_INFLIGHT=1) ──────────────────────────"
+    echo "── D1: Uniform delays (MAX_INFLIGHT=5) ──────────────────────────"
     D1_DELAYS=(0 5 10 20 50 100 200)
 
     for delay_ms in "${D1_DELAYS[@]}"; do
@@ -756,30 +790,16 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4s" ]]; then
         else
             jitter_ms=$(( delay_ms / 5 ))
         fi
-        BASE_ENV=(
-            "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
-            "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-            "HOT_RATIO=0" "INDEP_RATIO=90" "COMMON_RATIO=10"
-            "BATCH_MODE=single" "BATCH_COMPOSITION=object-specific"
-            "LOG_LEVEL=debug" "ENABLE_PRIORITY=false" "RATIO_STEP=0.001"
-            "MAX_INFLIGHT=1" "ENABLE_TIMESERIES=true"
-        )
+        set_base_env "$COMPARABLE_MAX_INFLIGHT"
         run_d1_case_sampled "eval4s_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
     done
 
-    RUNTIME_SECONDS=${_SAVED_RUNTIME}
+    echo "── D4: Bursting (MAX_INFLIGHT=5, 15s calm / 10s spike) ──────────"
+    set_base_env "$COMPARABLE_MAX_INFLIGHT"
+    run_d4_case_sampled "eval4s_D4_burst" 15 10 "$RUNTIME_SECONDS"
 
-    echo "── D4: Bursting (MAX_INFLIGHT=1, 15s calm / 10s spike) ──────────"
-    BASE_ENV=(
-        "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
-        "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-        "HOT_RATIO=0" "INDEP_RATIO=90" "COMMON_RATIO=10"
-        "BATCH_MODE=single" "BATCH_COMPOSITION=object-specific"
-        "LOG_LEVEL=debug" "ENABLE_PRIORITY=false" "RATIO_STEP=0.001"
-        "MAX_INFLIGHT=1" "ENABLE_TIMESERIES=true"
-    )
-    D4_RUNTIME=$(( RUNTIME_SECONDS < 90 ? 90 : RUNTIME_SECONDS ))
-    run_d4_case_sampled "eval4s_D4_burst" 15 10 "$D4_RUNTIME"
+    RUNTIME_SECONDS=${_SAVED_RUNTIME}
+    CRASH_TRIGGER_SECONDS=${_SAVED_CRASH_TRIGGER}
 fi
 
 echo ""

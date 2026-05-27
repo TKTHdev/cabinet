@@ -1,7 +1,7 @@
 #!/bin/bash
 # ================================================================
-# EVAL 4: Network Delay Evaluation
-# Tests latency impact with network emulation (netem): 0ms, 5ms, 10ms, 20ms, 50ms, 100ms, 200ms
+# EVAL 1: Independent vs Common Ratio Evaluation
+# Tests various workload compositions: 100/0, 90/10, 80/20, 60/40, 40/60, 20/80, 10/90, 0/100
 # Each configuration runs for 30 seconds
 # ================================================================
 
@@ -12,21 +12,26 @@ cd "$SCRIPT_DIR"
 
 USER="ubuntu"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
-REMOTE_DIR="/home/ubuntu/cabinet"
-BINARY="cabinet"
+REMOTE_DIR="/home/ubuntu/woc"
+BINARY="woc"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
-RESULT_ROOT="${SCRIPT_DIR}/results/eval4_network_delay"
+RESULT_ROOT="${SCRIPT_DIR}/results/eval1_indep_common_ratio"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 RUNTIME=30  # 30 seconds per test
 NUM_SERVERS=5
 NUM_CLIENTS=2
+THRESHOLD=1
+BATCHSIZE=1
+PIPELINE_MODE=true
 MAX_INFLIGHT=5
+MONGO_CLIENT_POOL=16
+LOG_LEVEL="info"
 
-# 5-Node Cluster
+# 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
 SERVER_IPS=(
 "192.168.73.159"
 "192.168.73.84"
@@ -40,18 +45,27 @@ CLIENT_HOST_IPS=(
 "192.168.73.219"
 )
 
-# Network delays to test (in milliseconds)
-DELAYS=(0 5 10 20 50 100 200)
-
 WORKLOAD="a"
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10)
 
 mkdir -p "$RUN_DIR"
 
+# Test cases: INDEP_RATIO/COMMON_RATIO pairs
+TEST_CASES=(
+"100.0/0.0"
+"90.0/10.0"
+"80.0/20.0"
+"60.0/40.0"
+"40.0/60.0"
+"20.0/80.0"
+"10.0/90.0"
+"0.0/100.0"
+)
+
 echo "=============================================="
-echo "EVAL 4: Network Delay Impact"
+echo "EVAL 1: Independent vs Common Ratio"
 echo "=============================================="
-echo "Test cases: ${#DELAYS[@]}"
+echo "Test cases: ${#TEST_CASES[@]}"
 echo "Runtime per test: ${RUNTIME}s"
 echo ""
 
@@ -59,11 +73,6 @@ remote_exec() {
     local host=$1
     shift
     ssh "${SSH_OPTS[@]}" "$USER@$host" "$*"
-}
-
-detect_interface() {
-    local host=$1
-    remote_exec "$host" "ip route show default 2>/dev/null | awk '{print \$5; exit}'"
 }
 
 create_remote_dirs() {
@@ -175,35 +184,35 @@ merge_case_results() {
 }
 
 start_workload_nodes() {
-    local delay=$1
+    local indep=$1
+    local common=$2
 
     echo "  Starting WOC servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'cabinet.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=0 -mload='$WORKLOAD' > '$LOG_DIR/server_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'cabinet.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=1 -mload='$WORKLOAD' > '$LOG_DIR/client_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
     done
 }
 
 stop_workload_nodes() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -TERM -x cabinet 2>/dev/null || true"
+        remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true"
     done
     sleep 3
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -9 -x cabinet 2>/dev/null || true"
+        remote_exec "$ip" "pkill -9 -x woc 2>/dev/null || true"
     done
 }
 
 cleanup() {
     stop_workload_nodes || true
-    remove_network_delay || true
     for ip in "${SERVER_IPS[@]}"; do
         remote_exec "$ip" "pkill -f mongod 2>/dev/null || true" || true
     done
@@ -211,70 +220,21 @@ cleanup() {
 
 trap cleanup EXIT
 
-apply_network_delay() {
-    local delay=$1
-    echo "  Applying ${delay}ms latency to all nodes..."
-    
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        iface=$(detect_interface "$ip")
-        if [ -z "$iface" ]; then
-            echo "  Warning: could not detect interface on $ip; skipping netem"
-            continue
-        fi
-        remote_exec "$ip" "sudo tc qdisc del dev '$iface' root 2>/dev/null || true; if [ '$delay' -gt 0 ]; then sudo tc qdisc add dev '$iface' root netem delay ${delay}ms; fi" 2>/dev/null &
-    done
-    wait
-    sleep 1
-}
-
-verify_network_delay() {
-    local delay=$1
-    echo "  Verifying latency on first node..."
-    remote_exec "${SERVER_IPS[0]}" "ping -c 1 ${SERVER_IPS[1]} 2>/dev/null || true" 2>/dev/null || true
-}
-
-remove_network_delay() {
-    echo "  Removing network delays..."
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        iface=$(detect_interface "$ip")
-        if [ -z "$iface" ]; then
-            continue
-        fi
-        remote_exec "$ip" "sudo tc qdisc del dev '$iface' root 2>/dev/null || true" 2>/dev/null &
-    done
-    wait
-}
-
-verify_network_interface() {
-    echo "  Detected interfaces:"
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        iface=$(detect_interface "$ip")
-        if [ -n "$iface" ]; then
-            echo "    $ip -> $iface"
-        else
-            echo "    $ip -> <not found>"
-        fi
-    done
-}
-
 start_cluster() {
-    local delay=$1
-    local test_num=$2
-    local label="delay_${delay}ms"
+    local indep=$1
+    local common=$2
+    local test_num=$3
+    local label="indep_${indep}_common_${common}"
     
     echo ""
-    echo "--- Test $test_num: NETWORK_DELAY=${delay}ms ---"
+    echo "--- Test $test_num: INDEP=$indep, COMMON=$common ---"
     
-    # Apply network delay
-    apply_network_delay "$delay"
-    verify_network_delay "$delay"
-    
-    start_workload_nodes "$delay"
+    start_workload_nodes "$indep" "$common"
     
     echo "  Cluster started. Running for ${RUNTIME}s..."
     sleep $RUNTIME
     
-    # Stop only workload processes between cases; MongoDB and netem stay controlled across the sweep.
+    # Stop only workload processes between cases; MongoDB stays up for the full sweep.
     echo "  Stopping workload processes..."
     stop_workload_nodes
     sleep 2
@@ -287,25 +247,20 @@ start_cluster() {
 # Run tests
 build_and_distribute
 
-verify_network_interface
-
 start_mongo_cluster
 init_replica_set
 
 test_num=1
-for delay in "${DELAYS[@]}"; do
-    start_cluster "$delay" "$test_num"
+for case in "${TEST_CASES[@]}"; do
+    indep=${case%/*}
+    common=${case#*/}
+    start_cluster "$indep" "$common" "$test_num"
     test_num=$((test_num + 1))
 done
 
-# Clean up network delays
-echo ""
-echo "  Cleaning up network delays..."
-remove_network_delay
-
 echo ""
 echo "=============================================="
-echo "✓ EVAL 4 COMPLETE"
+echo "✓ EVAL 1 COMPLETE"
 echo "=============================================="
 echo ""
 echo "Results archived in: $RUN_DIR"

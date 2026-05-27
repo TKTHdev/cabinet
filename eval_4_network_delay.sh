@@ -12,8 +12,8 @@ cd "$SCRIPT_DIR"
 
 USER="ubuntu"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
-REMOTE_DIR="/home/ubuntu/cabinet"
-BINARY="cabinet"
+REMOTE_DIR="/home/ubuntu/woc"
+BINARY="woc"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
@@ -24,7 +24,6 @@ RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 RUNTIME=30  # 30 seconds per test
 NUM_SERVERS=5
 NUM_CLIENTS=2
-MAX_INFLIGHT=5
 
 # 5-Node Cluster
 SERVER_IPS=(
@@ -180,24 +179,24 @@ start_workload_nodes() {
     echo "  Starting WOC servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'cabinet.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=0 -mload='$WORKLOAD' > '$LOG_DIR/server_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=0 -mload='$WORKLOAD' > '$LOG_DIR/server_${i}_delay_${delay}ms.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'cabinet.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=1 -mload='$WORKLOAD' > '$LOG_DIR/client_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=1 -mload='$WORKLOAD' > '$LOG_DIR/client_${i}_delay_${delay}ms.log' 2>&1 &"
     done
 }
 
 stop_workload_nodes() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -TERM -x cabinet 2>/dev/null || true"
+        remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true"
     done
     sleep 3
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -9 -x cabinet 2>/dev/null || true"
+        remote_exec "$ip" "pkill -9 -x woc 2>/dev/null || true"
     done
 }
 

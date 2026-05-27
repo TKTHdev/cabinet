@@ -1,7 +1,7 @@
 #!/bin/bash
 # ================================================================
-# EVAL 4: Network Delay Evaluation
-# Tests latency impact with network emulation (netem): 0ms, 5ms, 10ms, 20ms, 50ms, 100ms, 200ms
+# EVAL 3: Fault Tolerance Evaluation
+# Tests failure scenarios: No failures, 1 server fails, 2 servers fail
 # Each configuration runs for 30 seconds
 # ================================================================
 
@@ -12,27 +12,32 @@ cd "$SCRIPT_DIR"
 
 USER="ubuntu"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
-REMOTE_DIR="/home/ubuntu/cabinet"
-BINARY="cabinet"
+REMOTE_DIR="/home/ubuntu/woc"
+BINARY="woc"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
-RESULT_ROOT="${SCRIPT_DIR}/results/eval4_network_delay"
+RESULT_ROOT="${SCRIPT_DIR}/results/eval3_fault_tolerance"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 RUNTIME=30  # 30 seconds per test
 NUM_SERVERS=5
 NUM_CLIENTS=2
+THRESHOLD=1
+BATCHSIZE=1
+PIPELINE_MODE=true
 MAX_INFLIGHT=5
+MONGO_CLIENT_POOL=16
+LOG_LEVEL="info"
 
 # 5-Node Cluster
 SERVER_IPS=(
-"192.168.73.159"
-"192.168.73.84"
-"192.168.73.69"
-"192.168.73.235"
-"192.168.73.194"
+"192.168.73.159"  # Index 0
+"192.168.73.84"   # Index 1
+"192.168.73.69"   # Index 2
+"192.168.73.235"  # Index 3
+"192.168.73.194"  # Index 4
 )
 
 CLIENT_HOST_IPS=(
@@ -40,18 +45,32 @@ CLIENT_HOST_IPS=(
 "192.168.73.219"
 )
 
-# Network delays to test (in milliseconds)
-DELAYS=(0 5 10 20 50 100 200)
-
 WORKLOAD="a"
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10)
+
+# Test scenarios in a fixed order.
+SCENARIO_NAMES=(
+    "no_failure"
+    "node0_fails"
+    "node1_fails"
+    "node4_fails"
+    "node0_node1_fail"
+)
+
+SCENARIO_FAILS=(
+    ""
+    "0"
+    "1"
+    "4"
+    "0,1"
+)
 
 mkdir -p "$RUN_DIR"
 
 echo "=============================================="
-echo "EVAL 4: Network Delay Impact"
+echo "EVAL 3: Fault Tolerance"
 echo "=============================================="
-echo "Test cases: ${#DELAYS[@]}"
+echo "Test cases: ${#SCENARIO_NAMES[@]}"
 echo "Runtime per test: ${RUNTIME}s"
 echo ""
 
@@ -59,11 +78,6 @@ remote_exec() {
     local host=$1
     shift
     ssh "${SSH_OPTS[@]}" "$USER@$host" "$*"
-}
-
-detect_interface() {
-    local host=$1
-    remote_exec "$host" "ip route show default 2>/dev/null | awk '{print \$5; exit}'"
 }
 
 create_remote_dirs() {
@@ -105,7 +119,7 @@ start_mongo_cluster() {
 
 init_replica_set() {
     echo "  Initializing MongoDB replica set..."
-    remote_exec "${SERVER_IPS[0]}" "mongosh --eval \"rs.initiate({ _id: 'wocrs', members: [ {_id: 0, host: '${SERVER_IPS[0]}:27017'}, {_id: 1, host: '${SERVER_IPS[1]}:27017'}, {_id: 2, host: '${SERVER_IPS[2]}:27017'}, {_id: 3, host: '${SERVER_IPS[3]}:27017'}, {_id: 4, host: '${SERVER_IPS[4]}:27017'} ] })\" >/dev/null 2>&1 || true"
+    remote_exec "${SERVER_IPS[0]}" "mongosh --eval \"rs.initiate({ _id: 'wocrs', members: [ {_id: 0, host: '${SERVER_IPS[0]}:27017', priority: 1}, {_id: 1, host: '${SERVER_IPS[1]}:27017', priority: 1}, {_id: 2, host: '${SERVER_IPS[2]}:27017', priority: 0}, {_id: 3, host: '${SERVER_IPS[3]}:27017', priority: 0}, {_id: 4, host: '${SERVER_IPS[4]}:27017', priority: 0} ] })\" >/dev/null 2>&1 || true"
 
     for attempt in $(seq 1 30); do
         if remote_exec "${SERVER_IPS[0]}" "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1"; then
@@ -175,137 +189,95 @@ merge_case_results() {
 }
 
 start_workload_nodes() {
-    local delay=$1
+    local scenario=$1
 
     echo "  Starting WOC servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'cabinet.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=0 -mload='$WORKLOAD' > '$LOG_DIR/server_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=90.0 -common=10.0 -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_${scenario}.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'cabinet.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=1 -mload='$WORKLOAD' > '$LOG_DIR/client_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=90.0 -common=10.0 -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_${scenario}.log' 2>&1 &"
     done
 }
 
 stop_workload_nodes() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -TERM -x cabinet 2>/dev/null || true"
+        remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true"
     done
     sleep 3
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -9 -x cabinet 2>/dev/null || true"
+        remote_exec "$ip" "pkill -9 -x woc 2>/dev/null || true"
+    done
+}
+
+stop_mongo_cluster() {
+    for ip in "${SERVER_IPS[@]}"; do
+        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true"
     done
 }
 
 cleanup() {
     stop_workload_nodes || true
-    remove_network_delay || true
-    for ip in "${SERVER_IPS[@]}"; do
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true" || true
-    done
+    stop_mongo_cluster || true
 }
 
 trap cleanup EXIT
 
-apply_network_delay() {
-    local delay=$1
-    echo "  Applying ${delay}ms latency to all nodes..."
-    
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        iface=$(detect_interface "$ip")
-        if [ -z "$iface" ]; then
-            echo "  Warning: could not detect interface on $ip; skipping netem"
-            continue
-        fi
-        remote_exec "$ip" "sudo tc qdisc del dev '$iface' root 2>/dev/null || true; if [ '$delay' -gt 0 ]; then sudo tc qdisc add dev '$iface' root netem delay ${delay}ms; fi" 2>/dev/null &
-    done
-    wait
-    sleep 1
-}
-
-verify_network_delay() {
-    local delay=$1
-    echo "  Verifying latency on first node..."
-    remote_exec "${SERVER_IPS[0]}" "ping -c 1 ${SERVER_IPS[1]} 2>/dev/null || true" 2>/dev/null || true
-}
-
-remove_network_delay() {
-    echo "  Removing network delays..."
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        iface=$(detect_interface "$ip")
-        if [ -z "$iface" ]; then
-            continue
-        fi
-        remote_exec "$ip" "sudo tc qdisc del dev '$iface' root 2>/dev/null || true" 2>/dev/null &
-    done
-    wait
-}
-
-verify_network_interface() {
-    echo "  Detected interfaces:"
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        iface=$(detect_interface "$ip")
-        if [ -n "$iface" ]; then
-            echo "    $ip -> $iface"
-        else
-            echo "    $ip -> <not found>"
-        fi
-    done
-}
-
 start_cluster() {
-    local delay=$1
-    local test_num=$2
-    local label="delay_${delay}ms"
-    
+    local scenario=$1
+    local failed_nodes=$2
+
     echo ""
-    echo "--- Test $test_num: NETWORK_DELAY=${delay}ms ---"
-    
-    # Apply network delay
-    apply_network_delay "$delay"
-    verify_network_delay "$delay"
-    
-    start_workload_nodes "$delay"
-    
-    echo "  Cluster started. Running for ${RUNTIME}s..."
+    echo "--- Test: $scenario (Failed nodes: ${failed_nodes:-'None'}) ---"
+
+    start_mongo_cluster
+    init_replica_set
+    start_workload_nodes "$scenario"
+
+    echo "  Cluster started."
+    sleep 10  # Let it stabilize
+
+    if [ -n "$failed_nodes" ]; then
+        echo "  Injecting failures on nodes: $failed_nodes"
+        IFS=',' read -ra nodes <<< "$failed_nodes"
+        for node_id in "${nodes[@]}"; do
+            ip="${SERVER_IPS[$node_id]}"
+            remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true; pkill -f mongod 2>/dev/null || true" &
+        done
+        wait
+        sleep 2
+    fi
+
+    echo "  Running for ${RUNTIME}s..."
     sleep $RUNTIME
-    
-    # Stop only workload processes between cases; MongoDB and netem stay controlled across the sweep.
+
     echo "  Stopping workload processes..."
     stop_workload_nodes
     sleep 2
+    stop_mongo_cluster
 
     echo "  Archiving results..."
-    archive_case "$label" "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"
-    merge_case_results "$label"
+    archive_case "$scenario" "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"
+    merge_case_results "$scenario"
 }
 
 # Run tests
 build_and_distribute
 
-verify_network_interface
-
-start_mongo_cluster
-init_replica_set
-
-test_num=1
-for delay in "${DELAYS[@]}"; do
-    start_cluster "$delay" "$test_num"
-    test_num=$((test_num + 1))
+for idx in "${!SCENARIO_NAMES[@]}"; do
+    scenario="${SCENARIO_NAMES[$idx]}"
+    failed_nodes="${SCENARIO_FAILS[$idx]}"
+    start_cluster "$scenario" "$failed_nodes"
 done
-
-# Clean up network delays
-echo ""
-echo "  Cleaning up network delays..."
-remove_network_delay
 
 echo ""
 echo "=============================================="
-echo "✓ EVAL 4 COMPLETE"
+echo "✓ EVAL 3 COMPLETE"
 echo "=============================================="
 echo ""
 echo "Results archived in: $RUN_DIR"

@@ -70,6 +70,11 @@ read_server_ips() {
         exit 1
     fi
 }
+        echo "  Archiving eval and logs from ${host}..."
+        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
+            "$USER@$host:${REMOTE_EVAL_DIR}/." "$case_eval_dir/" || echo "  WARNING: failed to copy eval from ${host}"
+        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
+            "$USER@$host:${REMOTE_LOG_DIR}/." "$case_log_dir/" || echo "  WARNING: failed to copy logs from ${host}"
 
 copy_binary() {
     local host=$1
@@ -141,12 +146,19 @@ merge_case_results() {
     mkdir -p "$case_eval_dir" "$case_merged_dir"
 
     echo "Merging client and server CSVs for ${label}..."
-    if [ -f "$MERGE_SCRIPT" ]; then
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter"
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter"
-    else
+    if [ ! -f "$MERGE_SCRIPT" ]; then
         echo " ✗ merge_eval.py not found at ${MERGE_SCRIPT}"
+        return 1
     fi
+
+    # Skip merging if no CSVs were copied
+    if ! find "$case_eval_dir" -type f -name '*.csv' | read; then
+        echo " ✗ No CSV files found in ${case_eval_dir}; skipping merge"
+        return 0
+    fi
+
+    python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter" || echo "  WARNING: client merge returned non-zero"
+    python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter" || echo "  WARNING: server merge returned non-zero"
 }
 
 start_server() {

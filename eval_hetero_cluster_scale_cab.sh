@@ -117,6 +117,14 @@ stop_nodes() {
     done
 }
 
+reset_remote_outputs() {
+    local host
+
+    for host in "${SERVER_IPS[@]}" "${CLIENT_IPS[@]}"; do
+        remote_exec "$host" "rm -rf '$REMOTE_EVAL_DIR' '$REMOTE_LOG_DIR' && mkdir -p '$REMOTE_EVAL_DIR' '$REMOTE_LOG_DIR'"
+    done
+}
+
 archive_case() {
     local label=$1
     shift
@@ -150,12 +158,19 @@ merge_case_results() {
     mkdir -p "$case_eval_dir" "$case_merged_dir"
 
     echo "Merging client and server CSVs for ${label}..."
-    if [ -f "$MERGE_SCRIPT" ]; then
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter"
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter"
-    else
+    if [ ! -f "$MERGE_SCRIPT" ]; then
         echo " ✗ merge_eval.py not found at ${MERGE_SCRIPT}"
+        return 1
     fi
+
+    # Skip merging if no CSVs were copied
+    if ! find "$case_eval_dir" -type f -name '*.csv' | read; then
+        echo " ✗ No CSV files found in ${case_eval_dir}; skipping merge"
+        return 0
+    fi
+
+    python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter" || echo "  WARNING: client merge returned non-zero"
+    python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter" || echo "  WARNING: server merge returned non-zero"
 }
 
 start_server() {
@@ -231,6 +246,10 @@ EOF
 run_case() {
     local server_count=$1
     local config_local="${CONFIG_BY_COUNT[$server_count]}"
+    if [ -z "$config_local" ] || [ ! -f "$config_local" ]; then
+        echo "WARNING: config for server_count=${server_count} (${config_local:-<none>}) not found; skipping"
+        return 0
+    fi
     local config_remote="${REMOTE_DIR}/$(basename "$config_local")"
     local label="hetero_${server_count}"
     local max_inflight=5
@@ -241,6 +260,7 @@ run_case() {
     fi
 
     read_server_ips "$config_local" "$server_count"
+    reset_remote_outputs
 
     echo ""
     echo "=================================================="
