@@ -176,7 +176,11 @@ def merge_client_csvs(
 
                 # Per-batch rows have numeric pclock in column 0.
                 try:
-                    int(label)
+                    pclock = int(label)
+                    # Skip the first batch: its latency includes client->leader
+                    # connection setup (tens of seconds) and skews avg/percentiles.
+                    if pclock <= 1:
+                        continue
                     lat = _parse_float(_cell(row, 1))
                     if lat is not None and lat > 0:
                         all_latencies.append(lat)
@@ -230,7 +234,15 @@ def merge_client_csvs(
     total_tpt = sum(all_throughputs)
 
     total_ops = total_slow + total_conflict
-    slow_ratio = (total_slow / total_ops) if total_ops > 0 else 0.0
+    if total_ops > 0:
+        slow_ratio = total_slow / total_ops
+        conflict_ratio = total_conflict / total_ops
+        ratio_str = f"{slow_ratio * 100:.1f}% / {conflict_ratio * 100:.1f}%"
+    else:
+        # No slow/conflict commits recorded: report n/a rather than implying
+        # 100% conflict.
+        slow_ratio = 0.0
+        ratio_str = "n/a (no slow/conflict ops recorded)"
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -238,10 +250,10 @@ def merge_client_csvs(
         writer.writerow(["NUM_CLIENT_DIRS", len(client_dirs), "client* folders under eval"])
         writer.writerow(["NUM_CLIENTS_MERGED", merged_clients, "clients with CSV data"])
         writer.writerow(["TOTAL_THROUGHPUT", f"{total_tpt:.1f} Tx/sec", "sum of all clients"])
-        writer.writerow(["AVG_LATENCY", f"{avg_lat:.3f} ms", "across all batches all clients"])
-        writer.writerow(["P50_LATENCY", f"{p50:.1f} ms", ""])
-        writer.writerow(["P95_LATENCY", f"{p95:.1f} ms", ""])
-        writer.writerow(["P99_LATENCY", f"{p99:.1f} ms", ""])
+        writer.writerow(["AVG_LATENCY", f"{avg_lat:.3f} ms", "across all batches all clients (batch 1 excluded)"])
+        writer.writerow(["P50_LATENCY", f"{p50:.3f} ms", ""])
+        writer.writerow(["P95_LATENCY", f"{p95:.3f} ms", ""])
+        writer.writerow(["P99_LATENCY", f"{p99:.3f} ms", ""])
         writer.writerow(["TOTAL_SLOW_COMMITS", total_slow, f"{slow_ratio * 100:.1f}%"])
         writer.writerow(["TOTAL_CONFLICT_COMMITS", total_conflict, ""])
 
@@ -249,8 +261,8 @@ def merge_client_csvs(
     print(f"  Clients merged: {merged_clients}/{len(client_dirs)}")
     print(f"  Total throughput: {total_tpt:.1f} Tx/sec")
     print(f"  Avg latency: {avg_lat:.3f} ms")
-    print(f"  P99 latency: {p99:.1f} ms")
-    print(f"  Slow/Conflict ratio: {slow_ratio * 100:.1f}% / {(100.0 - slow_ratio * 100.0):.1f}%")
+    print(f"  P99 latency: {p99:.3f} ms")
+    print(f"  Slow/Conflict ratio: {ratio_str}")
 
     return output_path
 
