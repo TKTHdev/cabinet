@@ -277,14 +277,14 @@ start_workload_nodes() {
     echo "  Starting Cabinet servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$max_inflight nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=2 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_inflight_${max_inflight}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$max_inflight nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_inflight_${max_inflight}.log' 2>&1 &"
     done
 
     echo "  Starting Cabinet clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$max_inflight nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=2 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_inflight_${max_inflight}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$max_inflight nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_inflight_${max_inflight}.log' 2>&1 &"
     done
 }
 
