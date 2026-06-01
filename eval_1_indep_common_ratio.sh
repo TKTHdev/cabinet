@@ -173,7 +173,7 @@ copy_path_from_host() {
 
 create_remote_dirs() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "mkdir -p '$REMOTE_DIR' '$LOG_DIR' '$EVAL_DIR' '$REMOTE_DIR/mongodb_data'"
+        remote_exec "$ip" "mkdir -p '$REMOTE_DIR' '$REMOTE_DIR/config' '$LOG_DIR' '$EVAL_DIR' '$REMOTE_DIR/mongodb_data'"
     done
 }
 
@@ -231,6 +231,7 @@ build_and_distribute() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
         (
             copy_file_to_host "$BINARY" "$ip" "$REMOTE_DIR"
+            copy_file_to_host "${SCRIPT_DIR}/config/cluster_hetero_5n_2s3w.conf" "$ip" "$REMOTE_DIR/config"
         ) &
     done
     wait
