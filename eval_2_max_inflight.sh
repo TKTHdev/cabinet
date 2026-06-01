@@ -265,7 +265,6 @@ merge_case_results() {
 
     if [ -f "$MERGE_SCRIPT" ]; then
         python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter"
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter"
     else
         echo "  Warning: merge_eval.py not found at $MERGE_SCRIPT"
     fi
@@ -277,7 +276,7 @@ start_workload_nodes() {
     echo "  Starting Cabinet servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_inflight_${max_inflight}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_inflight_${max_inflight}.log' 2>&1 &"
     done
 
     echo "  Starting Cabinet clients..."
