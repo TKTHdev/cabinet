@@ -10,15 +10,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-USER="ubuntu"
-SSH_KEY="/home/ubuntu/.ssh/tani.pem"
+SSH_USER="${SSH_USER:-ubuntu}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/tani.pem}"
+CONTROLLER="${CONTROLLER:-auto}"
 REMOTE_DIR="/home/ubuntu/cabinet"
 REMOTE_EVAL_DIR="${REMOTE_DIR}/eval"
 REMOTE_LOG_DIR="${REMOTE_DIR}/logs"
 BINARY="cabinet"
 CLIENT_IPS=(
-    "192.168.73.218"
-    "192.168.73.219"
+    "192.168.73.11"
+    "192.168.73.234"
 )
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 
@@ -58,6 +59,61 @@ BASE_ENV=(
     "SERVER_BATCHING=false"
 )
 
+# Bastion: cora-c32-1 (internal 192.168.73.93 / public 134.87.11.79).
+BASTION_PUBLIC_IP="134.87.11.79"
+BASTION_INTERNAL_IP="192.168.73.93"
+
+detect_controller_mode() {
+    case "$CONTROLLER" in
+        laptop|bastion)
+            echo "$CONTROLLER"
+            ;;
+        auto)
+            local ips
+            ips="$(hostname -I 2>/dev/null || true)"
+            if [[ " ${ips} " == *" ${BASTION_INTERNAL_IP} "* ]]; then
+                echo "bastion"
+            else
+                echo "laptop"
+            fi
+            ;;
+        *)
+            echo "ERROR: CONTROLLER must be auto, laptop, or bastion (got: $CONTROLLER)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+CONTROLLER_MODE="$(detect_controller_mode)"
+
+if [ ! -f "$SSH_KEY" ]; then
+    echo "ERROR: SSH key not found: $SSH_KEY" >&2
+    echo "Set SSH_KEY=/path/to/key if it is stored elsewhere." >&2
+    exit 1
+fi
+
+SSH_BASE_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+PROXY_CMD="ssh -i '$SSH_KEY' -o BatchMode=yes -o StrictHostKeyChecking=accept-new -W %h:%p ${SSH_USER}@${BASTION_PUBLIC_IP}"
+
+ssh_opts_for() {
+    local host=$1
+    SSH_OPTS=("${SSH_BASE_OPTS[@]}")
+    SSH_IS_LOCAL=false
+
+    if [ "$CONTROLLER_MODE" = "bastion" ] && [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_IS_LOCAL=true
+        SSH_TARGET="localhost"
+    elif [ "$CONTROLLER_MODE" = "bastion" ]; then
+        SSH_TARGET="$host"
+    elif [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_TARGET="$BASTION_PUBLIC_IP"
+    else
+        SSH_OPTS+=(-o "ProxyCommand=$PROXY_CMD")
+        SSH_TARGET="$host"
+    fi
+}
+
+
 mkdir -p "$RUN_DIR"
 
 go build -o "$BINARY"
@@ -65,20 +121,36 @@ go build -o "$BINARY"
 remote_exec() {
     local host=$1
     shift
-    ssh -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$USER@$host" "$*"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        bash -s "$@"
+    else
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET" "$@"
+    fi
 }
 
 copy_binary() {
     local host=$1
-    scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$BINARY" "$USER@$host:$REMOTE_DIR/"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        cp "$BINARY" "$REMOTE_DIR/"
+    else
+        scp -q "${SSH_OPTS[@]}" "$BINARY" "$SSH_USER@$SSH_TARGET:$REMOTE_DIR/"
+    fi
 }
 
 copy_config() {
     local host=$1
     local config_local=$2
     local config_remote="$REMOTE_DIR/$(basename "$config_local")"
-    ssh -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$USER@$host" "mkdir -p '$REMOTE_DIR/config'"
-    scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$config_local" "$USER@$host:$config_remote"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        mkdir -p "$REMOTE_DIR/config"
+        cp "$config_local" "$config_remote"
+    else
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET" "mkdir -p '$REMOTE_DIR/config'"
+        scp -q "${SSH_OPTS[@]}" "$config_local" "$SSH_USER@$SSH_TARGET:$config_remote"
+    fi
 }
 
 read_server_ips() {
@@ -128,10 +200,14 @@ archive_case() {
 
     local host
     for host in "$@"; do
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${REMOTE_EVAL_DIR}/." "$case_eval_dir/" 2>/dev/null || true
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${REMOTE_LOG_DIR}/." "$case_log_dir/" 2>/dev/null || true
+        ssh_opts_for "$host"
+        if [ "$SSH_IS_LOCAL" = true ]; then
+            cp -r "${REMOTE_EVAL_DIR}/." "$case_eval_dir/" 2>/dev/null || true
+            cp -r "${REMOTE_LOG_DIR}/." "$case_log_dir/" 2>/dev/null || true
+        else
+            scp -q "${SSH_OPTS[@]}" -r                 "$SSH_USER@$SSH_TARGET:${REMOTE_EVAL_DIR}/." "$case_eval_dir/" 2>/dev/null || true
+            scp -q "${SSH_OPTS[@]}" -r                 "$SSH_USER@$SSH_TARGET:${REMOTE_LOG_DIR}/." "$case_log_dir/" 2>/dev/null || true
+        fi
     done
 }
 

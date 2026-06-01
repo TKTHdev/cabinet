@@ -27,24 +27,24 @@ RUNTIME_SECONDS="${RUNTIME_SECONDS:-0}"
 
 START_SCRIPT="start_mongodb_hetero_5n_fixed.sh"
 STOP_SCRIPT="stop_mongodb_hetero_5n.sh"
-EVAL1_SCRIPT="eval_1_indep_common_ratio_fixed.sh"
-EVAL2_SCRIPT="eval_2_max_inflight_fixed.sh"
-EVAL3_SCRIPT="eval_3_fault_tolerance_fixed.sh"
-EVAL4_SCRIPT="eval_4_network_delay_fixed.sh"
-EVAL5_SCRIPT="eval_5_workload_sweep.sh"
+EVAL1_SCRIPT="${EVAL1_SCRIPT:-eval_1_indep_common_ratio.sh}"
+EVAL2_SCRIPT="${EVAL2_SCRIPT:-eval_2_max_inflight.sh}"
+EVAL3_SCRIPT="${EVAL3_SCRIPT:-eval_3_fault_tolerance.sh}"
+EVAL4_SCRIPT="${EVAL4_SCRIPT:-eval_4_network_delay.sh}"
+EVAL5_SCRIPT="${EVAL5_SCRIPT:-eval_5_workload_sweep.sh}"
 
 if [ "${1:-}" = "--help" ]; then
     cat <<'EOF'
 Usage:
-    bash run_all_evals.sh [eval1] [eval2] [eval3] [eval4] [eval5]
+  bash run_all_evals.sh [eval1] [eval2] [eval3] [eval4] [eval5]
   bash run_all_evals.sh --workload [a-f] [runtime_seconds]
-    echo ""
+
 Eval toggles (1=run, 0=skip):
   eval1: Independent vs Common Ratio (default: 1)
   eval2: Max Pipeline In-Flight (default: 1)
   eval3: Fault Tolerance (default: 1)
   eval4: Network Delay (default: 1)
-    eval5: Workload Sweep (default: 1)
+  eval5: Workload Sweep (default: 1)
 
 Examples:
   bash run_all_evals.sh 1 1 0 0
@@ -54,6 +54,9 @@ Examples:
 Env overrides:
   WORKLOAD=a|b|c|d|e|f   (default: a)
   RUNTIME_SECONDS=0      (for --workload mode; 0 means leave running)
+  CONTROLLER=auto|laptop|bastion
+  SSH_KEY=/path/to/tani.pem
+  SSH_USER=ubuntu
 EOF
     exit 0
 fi
@@ -176,7 +179,7 @@ if [ -f "collect_eval_results.sh" ]; then
     fi
 else
     echo "Note: collect_eval_results.sh not found. Manual collection:"
-    echo "  ssh -i /path/to/tani.pem ubuntu@192.168.73.159 'ls -lah /home/ubuntu/woc/eval/'"
+    echo "  ssh -i /path/to/tani.pem ubuntu@192.168.73.93 'ls -lah /home/ubuntu/cabinet/eval/'"
 fi
 
 exit $EXIT_STATUS

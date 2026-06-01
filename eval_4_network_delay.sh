@@ -10,10 +10,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-USER="ubuntu"
-SSH_KEY="/home/ubuntu/.ssh/tani.pem"
-REMOTE_DIR="/home/ubuntu/woc"
-BINARY="woc"
+SSH_USER="${SSH_USER:-ubuntu}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/tani.pem}"
+CONTROLLER="${CONTROLLER:-auto}"
+REMOTE_DIR="/home/ubuntu/cabinet"
+BINARY="cabinet"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
@@ -27,29 +28,85 @@ NUM_CLIENTS=2
 
 # 5-Node Cluster
 SERVER_IPS=(
-"192.168.73.159"
-"192.168.73.84"
-"192.168.73.69"
-"192.168.73.235"
-"192.168.73.194"
+"192.168.73.93"
+"192.168.73.107"
+"192.168.73.79"
+"192.168.73.183"
+"192.168.73.211"
 )
 
 CLIENT_HOST_IPS=(
-"192.168.73.218"
-"192.168.73.219"
+"192.168.73.11"
+"192.168.73.234"
 )
 
 # Network delays to test (in milliseconds)
 DELAYS=(0 5 10 20 50 100 200)
 
 WORKLOAD="a"
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10)
+
+# Bastion: cora-c32-1 (internal 192.168.73.93 / public 134.87.11.79).
+BASTION_PUBLIC_IP="134.87.11.79"
+BASTION_INTERNAL_IP="192.168.73.93"
+
+detect_controller_mode() {
+    case "$CONTROLLER" in
+        laptop|bastion)
+            echo "$CONTROLLER"
+            ;;
+        auto)
+            local ips
+            ips="$(hostname -I 2>/dev/null || true)"
+            if [[ " ${ips} " == *" ${BASTION_INTERNAL_IP} "* ]]; then
+                echo "bastion"
+            else
+                echo "laptop"
+            fi
+            ;;
+        *)
+            echo "ERROR: CONTROLLER must be auto, laptop, or bastion (got: $CONTROLLER)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+CONTROLLER_MODE="$(detect_controller_mode)"
+
+if [ ! -f "$SSH_KEY" ]; then
+    echo "ERROR: SSH key not found: $SSH_KEY" >&2
+    echo "Set SSH_KEY=/path/to/key if it is stored elsewhere." >&2
+    exit 1
+fi
+
+SSH_BASE_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+PROXY_CMD="ssh -i '$SSH_KEY' -o BatchMode=yes -o StrictHostKeyChecking=accept-new -W %h:%p ${SSH_USER}@${BASTION_PUBLIC_IP}"
+
+ssh_opts_for() {
+    local host=$1
+    SSH_OPTS=("${SSH_BASE_OPTS[@]}")
+    SSH_IS_LOCAL=false
+
+    if [ "$CONTROLLER_MODE" = "bastion" ] && [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_IS_LOCAL=true
+        SSH_TARGET="localhost"
+    elif [ "$CONTROLLER_MODE" = "bastion" ]; then
+        SSH_TARGET="$host"
+    elif [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_TARGET="$BASTION_PUBLIC_IP"
+    else
+        SSH_OPTS+=(-o "ProxyCommand=$PROXY_CMD")
+        SSH_TARGET="$host"
+    fi
+}
 
 mkdir -p "$RUN_DIR"
 
 echo "=============================================="
 echo "EVAL 4: Network Delay Impact"
 echo "=============================================="
+echo "Controller: ${CONTROLLER_MODE}"
+echo "SSH user:   ${SSH_USER}"
+echo "SSH key:    ${SSH_KEY}"
 echo "Test cases: ${#DELAYS[@]}"
 echo "Runtime per test: ${RUNTIME}s"
 echo ""
@@ -57,7 +114,46 @@ echo ""
 remote_exec() {
     local host=$1
     shift
-    ssh "${SSH_OPTS[@]}" "$USER@$host" "$*"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        bash -lc "$*"
+    else
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET" "$*"
+    fi
+}
+
+copy_file_to_host() {
+    local src=$1
+    local host=$2
+    local dest_dir=$3
+
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        mkdir -p "$dest_dir"
+        local src_abs
+        local dest_abs
+        src_abs="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
+        dest_abs="$(cd "$dest_dir" && pwd -P)/$(basename "$src")"
+        if [ "$src_abs" != "$dest_abs" ]; then
+            cp "$src" "$dest_abs"
+        fi
+    else
+        scp "${SSH_OPTS[@]}" "$src" "$SSH_USER@$SSH_TARGET:$dest_dir/" 2>/dev/null
+    fi
+}
+
+copy_path_from_host() {
+    local host=$1
+    local remote_path=$2
+    local local_dir=$3
+
+    mkdir -p "$local_dir"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        cp -r "$remote_path" "$local_dir/" 2>/dev/null || true
+    else
+        scp -q "${SSH_OPTS[@]}" -r "$SSH_USER@$SSH_TARGET:${remote_path}/" "$local_dir/" 2>/dev/null || true
+    fi
 }
 
 detect_interface() {
@@ -94,7 +190,7 @@ start_mongo_cluster() {
     echo "  Starting MongoDB on all servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true; rm -f '$REMOTE_DIR/mongodb_data/mongod.lock' '$REMOTE_DIR/mongodb_data/WiredTiger.lock' '$LOG_DIR/mongod.log' 2>/dev/null || true; mkdir -p '$REMOTE_DIR/mongodb_data' '$LOG_DIR'; nohup mongod --port 27017 --replSet wocrs --dbpath '$REMOTE_DIR/mongodb_data' --bind_ip 0.0.0.0 --logpath '$LOG_DIR/mongod.log' --logappend > '$LOG_DIR/mongod.out' 2>&1 &"
+        remote_exec "$ip" "pkill -x mongod 2>/dev/null || true; rm -f '$REMOTE_DIR/mongodb_data/mongod.lock' '$REMOTE_DIR/mongodb_data/WiredTiger.lock' '$LOG_DIR/mongod.log' 2>/dev/null || true; mkdir -p '$REMOTE_DIR/mongodb_data' '$LOG_DIR'; nohup mongod --port 27017 --replSet cabinetrs --dbpath '$REMOTE_DIR/mongodb_data' --bind_ip 0.0.0.0 --logpath '$LOG_DIR/mongod.log' --logappend > '$LOG_DIR/mongod.out' 2>&1 &"
     done
 
     for i in "${!SERVER_IPS[@]}"; do
@@ -104,7 +200,7 @@ start_mongo_cluster() {
 
 init_replica_set() {
     echo "  Initializing MongoDB replica set..."
-    remote_exec "${SERVER_IPS[0]}" "mongosh --eval \"rs.initiate({ _id: 'wocrs', members: [ {_id: 0, host: '${SERVER_IPS[0]}:27017'}, {_id: 1, host: '${SERVER_IPS[1]}:27017'}, {_id: 2, host: '${SERVER_IPS[2]}:27017'}, {_id: 3, host: '${SERVER_IPS[3]}:27017'}, {_id: 4, host: '${SERVER_IPS[4]}:27017'} ] })\" >/dev/null 2>&1 || true"
+    remote_exec "${SERVER_IPS[0]}" "mongosh --eval \"rs.initiate({ _id: 'cabinetrs', members: [ {_id: 0, host: '${SERVER_IPS[0]}:27017'}, {_id: 1, host: '${SERVER_IPS[1]}:27017'}, {_id: 2, host: '${SERVER_IPS[2]}:27017'}, {_id: 3, host: '${SERVER_IPS[3]}:27017'}, {_id: 4, host: '${SERVER_IPS[4]}:27017'} ] })\" >/dev/null 2>&1 || true"
 
     for attempt in $(seq 1 30); do
         if remote_exec "${SERVER_IPS[0]}" "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1"; then
@@ -118,12 +214,14 @@ init_replica_set() {
 }
 
 build_and_distribute() {
-    echo "  Building WOC binary..."
+    echo "  Building Cabinet binary..."
     go build -o "$BINARY"
     
     echo "  Distributing to all nodes..."
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        scp "${SSH_OPTS[@]}" "$BINARY" "$USER@$ip:$REMOTE_DIR/" 2>/dev/null &
+        (
+            copy_file_to_host "$BINARY" "$ip" "$REMOTE_DIR"
+        ) &
     done
     wait
     echo "  ✓ Distribution complete"
@@ -140,10 +238,8 @@ archive_case() {
     for host in "$@"; do
         local node_dir="${case_dir}/node_${idx}"
         mkdir -p "$node_dir"
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${EVAL_DIR}/" "$node_dir/" 2>/dev/null || true
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${LOG_DIR}/" "$node_dir/" 2>/dev/null || true
+        copy_path_from_host "$host" "$EVAL_DIR" "$node_dir"
+        copy_path_from_host "$host" "$LOG_DIR" "$node_dir"
         idx=$((idx + 1))
     done
 }
@@ -176,27 +272,27 @@ merge_case_results() {
 start_workload_nodes() {
     local delay=$1
 
-    echo "  Starting WOC servers..."
+    echo "  Starting Cabinet servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=0 -mload='$WORKLOAD' > '$LOG_DIR/server_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=0 -mload='$WORKLOAD' > '$LOG_DIR/server_${i}_delay_${delay}ms.log' 2>&1 &"
     done
 
-    echo "  Starting WOC clients..."
+    echo "  Starting Cabinet clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=1 -mload='$WORKLOAD' > '$LOG_DIR/client_${i}_delay_${delay}ms.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=1 -role=1 -mload='$WORKLOAD' > '$LOG_DIR/client_${i}_delay_${delay}ms.log' 2>&1 &"
     done
 }
 
 stop_workload_nodes() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true"
+        remote_exec "$ip" "pkill -TERM -x cabinet 2>/dev/null || true"
     done
     sleep 3
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "pkill -9 -x woc 2>/dev/null || true"
+        remote_exec "$ip" "pkill -9 -x cabinet 2>/dev/null || true"
     done
 }
 
@@ -204,7 +300,7 @@ cleanup() {
     stop_workload_nodes || true
     remove_network_delay || true
     for ip in "${SERVER_IPS[@]}"; do
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true" || true
+        remote_exec "$ip" "pkill -x mongod 2>/dev/null || true" || true
     done
 }
 
