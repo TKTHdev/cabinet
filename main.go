@@ -140,7 +140,7 @@ func runServerRole(pscheme []float64) {
 		if err := perfM.SaveToFile(); err != nil {
 			log.Errorf("Server %d: failed to save metrics: %v", myServerID, err)
 		} else {
-			fmt.Printf("Server %d: metrics saved under ./eval/server%d/\n", myServerID, myServerID)
+			fmt.Printf("Server %d: metrics saved under ./eval_out/server%d/\n", myServerID, myServerID)
 		}
 	}
 

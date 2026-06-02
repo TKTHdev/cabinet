@@ -79,7 +79,7 @@ func startTimeSeriesRecorder(clientID int) func() {
 		return func() {}
 	}
 
-	dir := fmt.Sprintf("./eval/client%d", clientID)
+	dir := fmt.Sprintf("./eval_out/client%d", clientID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Warnf("Client %d: failed to create timeseries directory %s: %v", clientID, dir, err)
 		return func() {}
@@ -229,7 +229,7 @@ func RunClient(myServerID int, configPath string, numOps int, batchMode string, 
 			log.Errorf("Client %d: failed to save metrics: %v", myServerID, err)
 			return
 		}
-		fmt.Printf("Client %d: ✓ Client metrics saved to ./eval/client%d_eval.csv\n", myServerID, myServerID)
+		fmt.Printf("Client %d: ✓ Client metrics saved to ./eval_out/client%d_eval.csv\n", myServerID, myServerID)
 	}
 
 	// Background goroutine to save metrics on interrupt
@@ -462,9 +462,12 @@ perfM *eval.PerfMeter, batchComposition string, conflictCounterPtr *atomic.Int64
 	rpcLatency := time.Since(rpcStartTime)
 
 	if err != nil {
-		if errRec := perfM.RecordFinisher(cmd.ClientClock); errRec != nil {
-			// ignore
-		}
+		// Do NOT record the finisher for failed RPCs. A broken/instant transport
+		// error returns in ~microseconds; counting it as a completed batch
+		// inflates throughput with non-work and makes it oscillate run-to-run as
+		// the failure rate drifts. Leaving TimeElapsed==0 excludes the batch from
+		// the throughput/latency window, matching epaxos (client.go: no
+		// RecordFinisher on err) and woc (success-only throughput).
 		log.Warnf("[Client %d] Batch %d failed: %v | RPC time: %v ms", myServerID, cmd.ClientClock, err, rpcLatency.Milliseconds())
 	} else {
 		perfM.RecordFinisher(cmd.ClientClock)
