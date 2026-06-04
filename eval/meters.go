@@ -148,7 +148,7 @@ func (m *PerfMeter) SaveToFile() error {
 		folderName = "default"
 	}
 
-	dirPath := fmt.Sprintf("./eval/%s", folderName)
+	dirPath := fmt.Sprintf("./eval_out/%s", folderName)
 	err := os.MkdirAll(dirPath, 0755)
 	if err != nil {
 		return err

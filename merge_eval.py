@@ -119,6 +119,7 @@ def merge_client_csvs(
     pclock,latency (ms) per batch,throughput (Tx/sec),slow path ops,conflict ops
 
     Summary rows consumed:
+    - AVERAGE: column 1 (per-client effective avg latency, throughput-consistent)
     - THROUGHPUT: column 2
     - GLOBAL_TOTALS: column 3 (slow ops), column 4 (conflict ops)
     - TOTAL_SLOW_COMMITS: column 1
@@ -126,6 +127,7 @@ def merge_client_csvs(
     """
     all_latencies: list[float] = []
     all_throughputs: list[float] = []
+    client_avg_latencies: list[float] = []
     total_slow = 0
     total_conflict = 0
 
@@ -188,7 +190,15 @@ def merge_client_csvs(
                 except ValueError:
                     pass
 
-                if label == "THROUGHPUT":
+                if label == "AVERAGE":
+                    # Cabinet's own effective avg latency (col 1), consistent
+                    # with its wall-clock throughput. Preferred over the
+                    # per-batch latency column, which only measures active
+                    # processing time (microseconds).
+                    avg = _parse_float(_cell(row, 1))
+                    if avg is not None:
+                        client_avg_latencies.append(avg)
+                elif label == "THROUGHPUT":
                     tpt = _parse_float(_cell(row, 2))
                     if tpt is not None:
                         all_throughputs.append(tpt)
@@ -223,10 +233,19 @@ def merge_client_csvs(
 
     all_latencies.sort()
     n = len(all_latencies)
+    # Percentiles come from per-batch active latency (sub-ms). These are NOT
+    # directly comparable to the throughput-consistent avg below.
     p50 = all_latencies[n * 50 // 100]
     p95 = all_latencies[n * 95 // 100]
     p99 = all_latencies[n * 99 // 100]
-    avg_lat = sum(all_latencies) / n
+
+    # Headline avg latency: prefer cabinet's own AVERAGE (effective per-tx
+    # latency, consistent with throughput). Fall back to the per-batch mean
+    # only if no AVERAGE row was found.
+    if client_avg_latencies:
+        avg_lat = sum(client_avg_latencies) / len(client_avg_latencies)
+    else:
+        avg_lat = sum(all_latencies) / n
 
     # Note: Summing per-client throughputs is only valid if all clients ran for exactly the same duration.
     # If clients finish at different times, the sum will be inflated. For accurate total throughput,
@@ -250,10 +269,10 @@ def merge_client_csvs(
         writer.writerow(["NUM_CLIENT_DIRS", len(client_dirs), "client* folders under eval"])
         writer.writerow(["NUM_CLIENTS_MERGED", merged_clients, "clients with CSV data"])
         writer.writerow(["TOTAL_THROUGHPUT", f"{total_tpt:.1f} Tx/sec", "sum of all clients"])
-        writer.writerow(["AVG_LATENCY", f"{avg_lat:.3f} ms", "across all batches all clients (batch 1 excluded)"])
-        writer.writerow(["P50_LATENCY", f"{p50:.3f} ms", ""])
-        writer.writerow(["P95_LATENCY", f"{p95:.3f} ms", ""])
-        writer.writerow(["P99_LATENCY", f"{p99:.3f} ms", ""])
+        writer.writerow(["AVG_LATENCY", f"{avg_lat:.3f} ms", "mean of per-client AVERAGE (effective, throughput-consistent)"])
+        writer.writerow(["P50_LATENCY", f"{p50:.3f} ms", "per-batch active latency"])
+        writer.writerow(["P95_LATENCY", f"{p95:.3f} ms", "per-batch active latency"])
+        writer.writerow(["P99_LATENCY", f"{p99:.3f} ms", "per-batch active latency"])
         writer.writerow(["TOTAL_SLOW_COMMITS", total_slow, f"{slow_ratio * 100:.1f}%"])
         writer.writerow(["TOTAL_CONFLICT_COMMITS", total_conflict, ""])
 

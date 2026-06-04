@@ -76,7 +76,6 @@ func loadCommandLineInputs() {
 	flag.IntVar(&numOfServers, "n", 5, "# of servers")
 
 	flag.IntVar(&threshold, "t", 1, "# of quorum tolerated")
-	quorum = threshold + 1
 	flag.IntVar(&batchsize, "b", 1, "batch size")
 	flag.IntVar(&myServerID, "id", 0, "this server ID")
 	flag.StringVar(&configPath, "path", "./config/cluster_localhost.conf", "config file path")
@@ -128,6 +127,10 @@ func loadCommandLineInputs() {
 	flag.IntVar(&preloadClientCount, "preload-client-count", 4, "number of client IDs to preload independent objects for")
 
 	flag.Parse()
+	// quorum must be derived AFTER Parse: computing it at flag-registration time
+	// froze it at the default threshold (1 -> quorum 2), so -t never reached the
+	// priority scheme / consensus and every run committed on a single ack.
+	quorum = threshold + 1
 	if maxInflight < 1 {
 		maxInflight = 1
 	}

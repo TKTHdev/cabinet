@@ -18,7 +18,7 @@ REMOTE_WORKDATA_DIR="${REMOTE_DIR}/ycsb/workData"
 BINARY="cabinet"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
-EVAL_DIR="${REMOTE_DIR}/eval"
+EVAL_DIR="${REMOTE_DIR}/eval_out"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 RESULT_ROOT="${SCRIPT_DIR}/results/eval5_workload_sweep"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
@@ -249,7 +249,7 @@ init_replica_set() {
 
 build_and_distribute() {
     echo "  Building Cabinet binary..."
-    go build -o "$BINARY"
+    go build -o "$BINARY" || { echo "ERROR: go build failed; aborting." >&2; exit 1; }
 
     echo "  Distributing binary and config to all nodes..."
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
@@ -288,8 +288,8 @@ merge_case_results() {
     mkdir -p "$case_eval_dir" "$case_merged_dir"
 
     for node_dir in "${case_dir}"/node_*; do
-        [ -d "$node_dir/eval" ] || continue
-        cp -r "$node_dir/eval/"* "$case_eval_dir/" 2>/dev/null || true
+        [ -d "$node_dir/eval_out" ] || continue
+        cp -r "$node_dir/eval_out/"* "$case_eval_dir/" 2>/dev/null || true
     done
 
     if [ -f "$MERGE_SCRIPT" ]; then
@@ -305,14 +305,14 @@ start_workload_nodes() {
     echo "  Starting Cabinet servers for workload ${workload}..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$MAX_INFLIGHT nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_workload_${workload}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; rm -f '$LOG_DIR'/server_*.log '$LOG_DIR'/client_*.log 2>/dev/null || true; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$MAX_INFLIGHT nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_workload_${workload}.log' 2>&1 &"
     done
 
     echo "  Starting Cabinet clients for workload ${workload}..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$MAX_INFLIGHT nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_workload_${workload}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x cabinet 2>/dev/null || true; rm -rf '$EVAL_DIR'/* 2>/dev/null || true; mkdir -p '$EVAL_DIR'; rm -f '$LOG_DIR'/server_*.log '$LOG_DIR'/client_*.log 2>/dev/null || true; cd '$REMOTE_DIR'; PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$MAX_INFLIGHT nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_workload_${workload}.log' 2>&1 &"
     done
 }
 
